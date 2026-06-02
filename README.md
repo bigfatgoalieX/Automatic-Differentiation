@@ -19,14 +19,6 @@ cmake --build build
 ctest --test-dir build
 ```
 
-### IDE 跳转（Command+点击）
-
-工程已开启 `CMAKE_EXPORT_COMPILE_COMMANDS` 并包含 `.clangd` / `.vscode` 配置。若 `variable` 等无法跳转：
-
-1. 执行上面的 `cmake` 与 `compile_commands.json` 软链接；
-2. 在 Cursor 中 **Reload Window**（或重启 clangd：`clangd: Restart`）；
-3. 确认使用 **clangd** 扩展时，不要与 Microsoft **C/C++** 的 IntelliSense 同时抢同一个文件（可在设置里对该项目禁用其一）。
-
 ## 示例
 
 ```cpp
