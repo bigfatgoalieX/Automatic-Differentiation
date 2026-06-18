@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace ad {
 
@@ -122,6 +125,70 @@ private:
   SymbolicGradFn symbolic_grad_;
 };
 
+bool is_commutative(NodeKind kind) {
+  return kind == NodeKind::Add || kind == NodeKind::Mul;
+}
+
+struct NodeKey {
+  NodeKind kind;
+  std::vector<const Node*> children;
+  double constant_value{0.0};
+  int pow_exponent{0};
+  std::string custom_name;
+
+  bool operator==(const NodeKey& other) const {
+    return kind == other.kind && children == other.children &&
+           constant_value == other.constant_value &&
+           pow_exponent == other.pow_exponent &&
+           custom_name == other.custom_name;
+  }
+};
+
+void hash_combine(std::size_t& seed, std::size_t value) {
+  seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+struct NodeKeyHash {
+  std::size_t operator()(const NodeKey& key) const {
+    std::size_t seed = std::hash<int>{}(static_cast<int>(key.kind));
+    hash_combine(seed, std::hash<double>{}(key.constant_value));
+    hash_combine(seed, std::hash<int>{}(key.pow_exponent));
+    hash_combine(seed, std::hash<std::string>{}(key.custom_name));
+    for (const auto* child : key.children) {
+      hash_combine(seed, std::hash<const Node*>{}(child));
+    }
+    return seed;
+  }
+};
+
+using NodeCache = std::unordered_map<NodeKey, std::weak_ptr<const Node>, NodeKeyHash>;
+
+NodeCache& node_cache() {
+  static NodeCache cache;
+  return cache;
+}
+
+std::mutex& node_cache_mutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+template <typename CreateNode>
+std::shared_ptr<const Node> intern_node(const NodeKey& key, CreateNode create_node) {
+  std::lock_guard<std::mutex> lock(node_cache_mutex());
+  auto& cache = node_cache();
+  const auto it = cache.find(key);
+  if (it != cache.end()) {
+    if (auto existing = it->second.lock()) {
+      return existing;
+    }
+  }
+
+  auto node = create_node();
+  cache[key] = node;
+  return node;
+}
+
 }  // namespace
 
 std::shared_ptr<const Node> make_variable_node(const std::string& name) {
@@ -129,23 +196,46 @@ std::shared_ptr<const Node> make_variable_node(const std::string& name) {
 }
 
 std::shared_ptr<const Node> make_constant_node(double value) {
-  return std::make_shared<ConstantNode>(value);
+  NodeKey key;
+  key.kind = NodeKind::Constant;
+  key.constant_value = value;
+  return intern_node(key, [value]() { return std::make_shared<ConstantNode>(value); });
 }
 
 std::shared_ptr<const Node> make_binary_node(NodeKind kind,
                                              std::shared_ptr<const Node> lhs,
                                              std::shared_ptr<const Node> rhs) {
-  return std::make_shared<BinaryNode>(kind, std::move(lhs), std::move(rhs));
+  if (is_commutative(kind) && std::less<const Node*>{}(rhs.get(), lhs.get())) {
+    std::swap(lhs, rhs);
+  }
+
+  NodeKey key;
+  key.kind = kind;
+  key.children = {lhs.get(), rhs.get()};
+  return intern_node(key, [&]() {
+    return std::make_shared<BinaryNode>(kind, std::move(lhs), std::move(rhs));
+  });
 }
 
 std::shared_ptr<const Node> make_unary_node(NodeKind kind,
                                             std::shared_ptr<const Node> child) {
-  return std::make_shared<UnaryNode>(kind, std::move(child));
+  NodeKey key;
+  key.kind = kind;
+  key.children = {child.get()};
+  return intern_node(key, [&]() {
+    return std::make_shared<UnaryNode>(kind, std::move(child));
+  });
 }
 
 std::shared_ptr<const Node> make_pow_node(std::shared_ptr<const Node> base,
                                           int exponent) {
-  return std::make_shared<PowNode>(std::move(base), exponent);
+  NodeKey key;
+  key.kind = NodeKind::Pow;
+  key.children = {base.get()};
+  key.pow_exponent = exponent;
+  return intern_node(key, [&]() {
+    return std::make_shared<PowNode>(std::move(base), exponent);
+  });
 }
 
 bool is_variable_node(const std::shared_ptr<const Node>& node) {
@@ -273,8 +363,19 @@ Expr make_custom_op(const std::string& name, const std::vector<Expr>& inputs,
   for (const auto& e : inputs) {
     nodes.push_back(e.node());
   }
-  return detail::make_expr(std::make_shared<CustomNode>(
-      name, std::move(nodes), std::move(forward), std::move(symbolic_grad)));
+
+  NodeKey key;
+  key.kind = NodeKind::Custom;
+  key.custom_name = name;
+  key.children.reserve(nodes.size());
+  for (const auto& node : nodes) {
+    key.children.push_back(node.get());
+  }
+
+  return detail::make_expr(intern_node(key, [&]() {
+    return std::make_shared<CustomNode>(
+        name, std::move(nodes), std::move(forward), std::move(symbolic_grad));
+  }));
 }
 
 }  // namespace ad

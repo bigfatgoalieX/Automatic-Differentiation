@@ -21,9 +21,77 @@ bool approx_equal(double a, double b, double tol = 1e-6) {
   return std::abs(a - b) <= tol;
 }
 
+bool run_cse_tests() {
+  const auto x = ad::Expr::variable("x");
+  const auto p = ad::Expr::variable("p");
+
+  if (ad::same_expr(x, ad::Expr::variable("x"))) {
+    std::cerr << "same-name variables should preserve distinct identity\n";
+    return false;
+  }
+
+  const auto c1 = ad::Expr::constant(2.0);
+  const auto c2 = ad::Expr::constant(2.0);
+  if (!ad::same_expr(c1, c2)) {
+    std::cerr << "equal constants were not interned\n";
+    return false;
+  }
+
+  const auto constant_derivatives = c1.derivative({c2});
+  const ad::Evaluator constant_derivative({constant_derivatives[0]});
+  const auto dc = constant_derivative.evaluate({});
+  if (!approx_equal(dc[0], 0.0)) {
+    std::cerr << "constant derivative mismatch: " << dc[0] << " vs 0\n";
+    return false;
+  }
+
+  const auto xp = x * p;
+  if (!ad::same_expr(xp, x * p)) {
+    std::cerr << "repeated multiplication was not interned\n";
+    return false;
+  }
+  if (!ad::same_expr(xp, p * x)) {
+    std::cerr << "commutative multiplication was not canonicalized\n";
+    return false;
+  }
+
+  const auto e1 = ad::exp(x * p);
+  const auto e2 = ad::exp(p * x);
+  if (!ad::same_expr(e1, e2)) {
+    std::cerr << "repeated exp subexpression was not interned\n";
+    return false;
+  }
+
+  const auto repeated = ad::exp(x * p) + ad::exp(p * x);
+  const auto d_repeated_p = repeated.derivative({p})[0];
+  const ad::Evaluator evaluator({repeated, d_repeated_p});
+
+  const double xv = 3.0;
+  const double pv = 0.25;
+  const auto results = evaluator.evaluate({{"x", xv}, {"p", pv}});
+  const double expected = 2.0 * std::exp(xv * pv);
+  const double expected_derivative = 2.0 * xv * std::exp(xv * pv);
+  if (!approx_equal(results[0], expected)) {
+    std::cerr << "CSE expression value mismatch: " << results[0] << " vs "
+              << expected << '\n';
+    return false;
+  }
+  if (!approx_equal(results[1], expected_derivative)) {
+    std::cerr << "CSE derivative mismatch: " << results[1] << " vs "
+              << expected_derivative << '\n';
+    return false;
+  }
+
+  return true;
+}
+
 }  // namespace
 
 int main() {
+  if (!run_cse_tests()) {
+    return 1;
+  }
+
   const auto p = ad::Expr::variable("p");
   const auto x = ad::Expr::variable("x");
   const auto y = ad::Expr::variable("y");
