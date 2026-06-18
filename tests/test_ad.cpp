@@ -37,7 +37,8 @@ bool run_cse_tests() {
     return false;
   }
 
-  const ad::Evaluator constant_derivative(c1.derivative({c2}));
+  const auto constant_derivatives = c1.derivative({c2});
+  const ad::Evaluator constant_derivative({constant_derivatives[0]});
   const auto dc = constant_derivative.evaluate({});
   if (!approx_equal(dc[0], 0.0)) {
     std::cerr << "constant derivative mismatch: " << dc[0] << " vs 0\n";
